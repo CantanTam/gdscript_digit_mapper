@@ -1,7 +1,7 @@
 @tool
 extends EditorPlugin
 
-const PLUGIN_VERSION = "1.5.8"
+const PLUGIN_VERSION = "1.5.13"
 const CONFIG_PATH = "user://gdscript_digit_mapper.cfg"
 const MENU_NAME = "GDScript Digit Mapper 设置"
 
@@ -27,6 +27,7 @@ var digit_popup_visible = false
 var digit_selected_index = 0
 var digit_info = {}
 var digit_items = []
+var digit_popup_theme_key = ""
 var ignore_next_popup_update = false
 var tab_completion_enabled = true
 
@@ -53,6 +54,7 @@ func _exit_tree() -> void:
 func _process(_delta: float) -> void:
     _refresh_editor()
     if digit_popup_visible and code_edit != null and is_instance_valid(code_edit):
+        _apply_digit_popup_theme()
         _position_digit_popup()
 
 func _refresh_editor() -> void:
@@ -169,7 +171,7 @@ func _valid_sequence(sequence: String, mapping) -> bool:
             return false
         has_letter = true
 
-    # “ .”本身也显示全部数字候选；所以没有字母也是合法的。
+    # “.” 本身是合法触发前缀，但候选列表会在 _get_digit_candidates() 中保持为空。
     return true
 
 func _map_sequence(sequence: String, mapping) -> String:
@@ -242,41 +244,142 @@ func _ensure_digit_popup() -> void:
     if is_instance_valid(digit_popup):
         return
 
-    digit_popup = PanelContainer.new()
+    digit_popup = Panel.new()
     digit_popup.name = "GDScriptDigitMapperPopup"
     digit_popup.mouse_filter = Control.MOUSE_FILTER_IGNORE
     digit_popup.focus_mode = Control.FOCUS_NONE
     digit_popup.z_index = 1000
     digit_popup.visible = false
 
-    var box = VBoxContainer.new()
-    box.name = "Rows"
-    box.add_theme_constant_override("separation", 0)
-    digit_popup.add_child(box)
-
+    # 使用普通 Panel，而不是 PanelContainer。
+    # PanelContainer 会把子控件的内部最小尺寸传播到自身，导致
+    # 提示框高度无法严格按照我们指定的尺寸缩小。
     code_edit.add_child(digit_popup)
+    _apply_digit_popup_theme(true)
 
 func _rebuild_digit_rows() -> void:
     if not is_instance_valid(digit_popup):
         return
 
-    var box = digit_popup.get_node("Rows") as VBoxContainer
-    for child in box.get_children():
+    for child in digit_popup.get_children():
         child.queue_free()
     digit_rows.clear()
 
+    var row_height = _get_digit_row_height()
     var count = digit_items.size()
     for i in range(count):
         var label = Label.new()
         label.mouse_filter = Control.MOUSE_FILTER_IGNORE
         label.text = ("→" if i == digit_selected_index else " ") + String(digit_items[i])
-        label.custom_minimum_size = Vector2(150, 24)
-        label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-        box.add_child(label)
+        label.custom_minimum_size = Vector2.ZERO
+        label.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+        label.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+        label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+        var code_font = code_edit.get_theme_font("font")
+        if code_font != null:
+            label.add_theme_font_override("font", code_font)
+        label.add_theme_font_size_override("font_size", _get_editor_code_font_size())
+        digit_popup.add_child(label)
         digit_rows.append(label)
 
-    digit_popup.custom_minimum_size = Vector2(150, max(26, count * 24 + 6))
-    digit_popup.size = digit_popup.custom_minimum_size
+    _apply_digit_popup_theme(true)
+    _resize_digit_popup()
+
+func _get_editor_theme_name() -> String:
+    var settings = get_editor_interface().get_editor_settings()
+    if settings == null:
+        return ""
+
+    # 不同 Godot 4 版本使用的设置名略有不同：兼容 preset 和 color_preset。
+    var parts = []
+    for key in ["interface/theme/preset", "interface/theme/color_preset"]:
+        var value = settings.get_setting(key)
+        if value != null:
+            parts.append(String(value).to_lower())
+    return " ".join(parts)
+
+func _get_editor_code_font_size() -> int:
+    var settings = get_editor_interface().get_editor_settings()
+    if settings != null:
+        var configured_size = settings.get_setting("interface/editor/fonts/code_font_size")
+        if configured_size is int and int(configured_size) > 0:
+            return int(configured_size)
+    return 16
+
+func _get_digit_row_height() -> float:
+    # 取得 CodeEdit 实际使用的字体高度，而不是拿字体大小直接当高度。
+    # 这样提示框高度会与编辑器代码字体本身一致。
+    if code_edit != null and is_instance_valid(code_edit):
+        var code_font = code_edit.get_theme_font("font")
+        if code_font != null:
+            return float(code_font.get_height(_get_editor_code_font_size()))
+    return float(_get_editor_code_font_size())
+
+func _resize_digit_popup() -> void:
+    if not is_instance_valid(digit_popup):
+        return
+
+    var row_height = _get_digit_row_height()
+    var width = 0.0
+
+    for row in digit_rows:
+        if not is_instance_valid(row):
+            continue
+        width = max(width, row.get_minimum_size().x)
+
+    # 左右各 7px；上下各 2px。
+    width += 14.0
+    var height = row_height + 4.0
+
+    # 普通 Panel 不会把 Label 的最小尺寸反向撑大自己，因此这里的尺寸就是
+    # 实际显示尺寸：字体高度 + 上下 padding。
+    digit_popup.custom_minimum_size = Vector2.ZERO
+    digit_popup.size = Vector2(width, height)
+
+    for row in digit_rows:
+        if not is_instance_valid(row):
+            continue
+        row.position = Vector2(7.0, 2.0)
+        row.size = Vector2(max(0.0, width - 14.0), row_height)
+
+func _apply_digit_popup_theme(force: bool = false) -> void:
+    if not is_instance_valid(digit_popup):
+        return
+
+    var theme_name = _get_editor_theme_name()
+    var is_light = theme_name.contains("light")
+    var row_height = _get_digit_row_height()
+    # 字体大小也纳入 theme key，这样修改编辑器字体大小后，提示框高度会立即同步。
+    var theme_key = ("light" if is_light else "dark") + ":" + str(int(row_height))
+    if not force and digit_popup_theme_key == theme_key:
+        return
+
+    var style = StyleBoxFlat.new()
+    # Light 主题：黑底白字；非 Light 主题：白底黑字。
+    style.bg_color = Color(0, 0, 0, 1) if is_light else Color(1, 1, 1, 1)
+    style.corner_radius_top_left = 5
+    style.corner_radius_top_right = 5
+    style.corner_radius_bottom_right = 5
+    style.corner_radius_bottom_left = 5
+    style.border_width_left = 1
+    style.border_width_top = 1
+    style.border_width_right = 1
+    style.border_width_bottom = 1
+    style.border_color = Color(1, 1, 1, 1) if is_light else Color(0, 0, 0, 1)
+    style.content_margin_left = 7
+    style.content_margin_right = 7
+
+    digit_popup.add_theme_stylebox_override("panel", style)
+
+    var font_color = Color(1, 1, 1, 1) if is_light else Color(0, 0, 0, 1)
+    for row in digit_rows:
+        if is_instance_valid(row):
+            row.custom_minimum_size = Vector2.ZERO
+            row.add_theme_color_override("font_color", font_color)
+            row.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0))
+
+    _resize_digit_popup()
+    digit_popup_theme_key = theme_key
 
 func _position_digit_popup() -> void:
     if not is_instance_valid(digit_popup) or code_edit == null or not is_instance_valid(code_edit):
@@ -299,6 +402,7 @@ func _position_digit_popup() -> void:
 
 func _hide_digit_popup() -> void:
     digit_popup_visible = false
+    digit_popup_theme_key = ""
     digit_info.clear()
     digit_items.clear()
     digit_selected_index = 0
@@ -307,6 +411,7 @@ func _hide_digit_popup() -> void:
 
 func _destroy_digit_popup() -> void:
     digit_popup_visible = false
+    digit_popup_theme_key = ""
     digit_info.clear()
     digit_items.clear()
     digit_selected_index = 0
