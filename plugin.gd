@@ -1,7 +1,7 @@
 @tool
 extends EditorPlugin
 
-const PLUGIN_VERSION = "1.5.13"
+const PLUGIN_VERSION = "1.5.14"
 const CONFIG_PATH = "user://gdscript_digit_mapper.cfg"
 const MENU_NAME = "GDScript Digit Mapper 设置"
 
@@ -19,6 +19,15 @@ const DEFAULT_MAPPING = {
 }
 
 const DIGITS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+
+# 在这些运算符/分隔符之后，“.”处于新的表达式起始位置。
+const TRIGGER_CHARS = "=+-*/%<>&|^~!([{,:?;"
+
+# 这些关键字之后通常需要一个新的表达式。
+const TRIGGER_KEYWORDS = [
+    "return", "if", "elif", "while", "assert", "await", "yield",
+    "in", "not", "and", "or", "match", "case", "else"
+]
 
 var code_edit = null
 var digit_popup = null
@@ -135,7 +144,7 @@ func _get_mapping_info(mapping) -> Dictionary:
         return {}
     if line.substr(start, 1) != ".":
         return {}
-    if start == 0 or line.substr(start - 1, 1) != " ":
+    if not _is_digit_trigger_context(line, start):
         return {}
 
     var sequence = line.substr(start, caret - start)
@@ -156,6 +165,71 @@ func _is_mapping_char(ch: String, mapping) -> bool:
     for digit in DIGITS:
         if String(mapping[digit]) == ch:
             return true
+    return false
+
+func _is_digit_trigger_context(line: String, dot_pos: int) -> bool:
+    # 先排除字符串和注释中的“.”，避免修改普通文本内容。
+    var in_single = false
+    var in_double = false
+    var escaped = false
+
+    for i in range(dot_pos):
+        var ch = line.substr(i, 1)
+
+        if escaped:
+            escaped = false
+            continue
+
+        if (in_single or in_double) and ch == "\\":
+            escaped = true
+            continue
+
+        if not in_single and not in_double and ch == "#":
+            return false
+
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            continue
+
+        if ch == "\"" and not in_single:
+            in_double = not in_double
+
+    if in_single or in_double:
+        return false
+
+    # 忽略空白，找到“.”前面的实际语法字符。
+    var i = dot_pos - 1
+    while i >= 0:
+        var ch = line.substr(i, 1)
+        if ch != " " and ch != "\t":
+            break
+        i -= 1
+
+    # 行首：可以直接开始数字映射。
+    if i < 0:
+        return true
+
+    var prev = line.substr(i, 1)
+
+    # 运算符、分隔符之后属于新的表达式位置，可以触发。
+    # 同时覆盖 + - * / %、比较、位运算、赋值、括号、数组/字典
+    # 分隔符等 GDScript 常见表达式起始位置。
+    if TRIGGER_CHARS.contains(prev):
+        return true
+
+    # 某些关键字后面本来就要求一个新的表达式。
+    # 例如：return .yws、if .yws、foo in .yws。
+    var prefix = line.substr(0, i + 1).strip_edges().replace("\t", " ")
+    var words = prefix.split(" ", false)
+    if words.is_empty():
+        return true
+
+    var last_word = String(words[words.size() - 1])
+    if TRIGGER_KEYWORDS.has(last_word):
+        return true
+
+    # 字母、数字、下划线、右括号等通常表示前面已经是一个完整的
+    # 标识符/表达式，此时“.”应继续作为普通成员访问或数字小数点。
     return false
 
 func _valid_sequence(sequence: String, mapping) -> bool:
@@ -588,7 +662,7 @@ func _build_settings_dialog() -> void:
     settings_dialog.add_child(root)
 
     var help = Label.new()
-    help.text = "数字映射：输入 空格 + . 开始，输入数字映射字母后显示候选。\n例如：  空格.ysee.wr  →  1322.50\n刚输入“.”时不显示初始候选。中间的 . 始终作为普通点号。\n上下箭头不再选择补全，Tab / Shift+Tab 选择。\n映射候选按 Space 输入数字；按 Enter 保留原字符并追加一个空格，不换行；再次按 Enter 才由 Godot 换行。"
+    help.text = "数字映射：在表达式起始/分隔位置输入 . 开始，输入数字映射字母后显示候选。\n例如：  10 + .ysee.wr  →  10 + 1322.50\n刚输入“.”时不显示初始候选。中间的 . 始终作为普通点号；a.b、foo().bar、1.5 等不会触发。\n上下箭头不再选择补全，Tab / Shift+Tab 选择。\n映射候选按 Space 输入数字；按 Enter 保留原字符并追加一个空格，不换行；再次按 Enter 才由 Godot 换行。"
     help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
     root.add_child(help)
 
